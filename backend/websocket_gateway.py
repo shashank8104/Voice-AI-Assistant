@@ -238,6 +238,18 @@ async def run_ai_pipeline(session: Session):
     await send_status(session, State.USER_SPEAKING)
 
 
+# ── Keepalive ───────────────────────────────────────────────────────────────────
+
+async def websocket_keepalive(session: Session):
+    """Send a ping every 25s to prevent Render/proxy from closing idle connections."""
+    while True:
+        await asyncio.sleep(25)
+        try:
+            await session.websocket.send_json({"type": "ping"})
+        except Exception:
+            break  # Connection is gone
+
+
 # ── Timeout watcher ────────────────────────────────────────────────────────────
 
 async def session_timeout_watcher(session: Session):
@@ -269,6 +281,7 @@ async def websocket_endpoint(websocket: WebSocket):
     logger.info(f"[Session {session_id}] Connected. Total: {len(active_sessions)}")
 
     session.timeout_task = asyncio.create_task(session_timeout_watcher(session))
+    asyncio.create_task(websocket_keepalive(session))  # Keep Render proxy alive
     session.transition(State.USER_SPEAKING)
     await send_status(session, State.USER_SPEAKING)
 
