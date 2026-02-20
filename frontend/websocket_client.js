@@ -5,7 +5,8 @@
  */
 
 const VoiceClient = (() => {
-    const WS_URL = `ws://${window.location.host}/ws`;
+    const WS_PROTOCOL = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const WS_URL = `${WS_PROTOCOL}//${window.location.host}/ws`;
 
     let ws = null;
     let isSessionActive = false;
