@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Voice Assistant</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0a0a0f;
+      --surface: #12121a;
+      --surface2: #1a1a28;
+      --border: #2a2a3d;
+      --accent: #6c63ff;
+      --accent2: #a78bfa;
+      --green: #34d399;
+      --yellow: #fbbf24;
+      --red: #f87171;
+      --text: #e2e8f0;
+      --text-muted: #64748b;
+      --radius: 20px;
+    }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+
+    /* Animated background */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background:
+        radial-gradient(ellipse 80% 50% at 20% 40%, rgba(108,99,255,0.08) 0%, transparent 60%),
+        radial-gradient(ellipse 60% 40% at 80% 60%, rgba(167,139,250,0.06) 0%, transparent 60%);
+      pointer-events: none;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 480px;
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 32px;
+      position: relative;
+      z-index: 1;
+    }
+
+    /* Header */
+    .header { text-align: center; }
+    .header h1 {
+      font-size: 28px;
+      font-weight: 700;
+      background: linear-gradient(135deg, #6c63ff, #a78bfa, #60a5fa);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      letter-spacing: -0.5px;
+    }
+    .header p {
+      margin-top: 6px;
+      font-size: 13px;
+      color: var(--text-muted);
+      font-weight: 400;
+    }
+
+    /* Orb */
+    .orb-wrapper {
+      position: relative;
+      width: 180px;
+      height: 180px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .orb-ring {
+      position: absolute;
+      inset: 0;
+      border-radius: 50%;
+      border: 1.5px solid rgba(108,99,255,0.2);
+      animation: spin 8s linear infinite;
+    }
+    .orb-ring:nth-child(2) {
+      inset: 12px;
+      border-color: rgba(167,139,250,0.15);
+      animation-duration: 12s;
+      animation-direction: reverse;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .orb {
+      width: 120px;
+      height: 120px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 35% 35%, #6c63ff, #3b0764);
+      box-shadow:
+        0 0 40px rgba(108,99,255,0.3),
+        0 0 80px rgba(108,99,255,0.1),
+        inset 0 0 30px rgba(255,255,255,0.05);
+      cursor: pointer;
+      transition: transform 0.2s ease, box-shadow 0.3s ease;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      z-index: 2;
+    }
+
+    .orb:hover { transform: scale(1.05); }
+    .orb:active { transform: scale(0.97); }
+
+    .orb svg {
+      width: 36px;
+      height: 36px;
+      fill: white;
+      opacity: 0.9;
+      transition: opacity 0.2s;
+    }
+
+    /* Orb state animations */
+    .orb.listening {
+      animation: pulse-listen 1.5s ease-in-out infinite;
+      box-shadow:
+        0 0 40px rgba(52,211,153,0.4),
+        0 0 80px rgba(52,211,153,0.15),
+        inset 0 0 30px rgba(255,255,255,0.05);
+      background: radial-gradient(circle at 35% 35%, #34d399, #065f46);
+    }
+
+    .orb.thinking {
+      animation: pulse-think 0.8s ease-in-out infinite;
+      box-shadow:
+        0 0 40px rgba(251,191,36,0.4),
+        0 0 80px rgba(251,191,36,0.15),
+        inset 0 0 30px rgba(255,255,255,0.05);
+      background: radial-gradient(circle at 35% 35%, #fbbf24, #78350f);
+    }
+
+    .orb.speaking {
+      animation: pulse-speak 0.6s ease-in-out infinite;
+      box-shadow:
+        0 0 40px rgba(108,99,255,0.6),
+        0 0 100px rgba(108,99,255,0.2),
+        inset 0 0 30px rgba(255,255,255,0.08);
+      background: radial-gradient(circle at 35% 35%, #818cf8, #3730a3);
+    }
+
+    @keyframes pulse-listen {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.06); }
+    }
+    @keyframes pulse-think {
+      0%, 100% { transform: scale(1) rotate(0deg); }
+      50% { transform: scale(1.04) rotate(3deg); }
+    }
+    @keyframes pulse-speak {
+      0%, 100% { transform: scale(1); }
+      25% { transform: scale(1.08); }
+      75% { transform: scale(0.96); }
+    }
+
+    /* Sound waves (visible during speaking) */
+    .waves {
+      position: absolute;
+      inset: -30px;
+      border-radius: 50%;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+    .waves.active { opacity: 1; }
+    .wave {
+      position: absolute;
+      inset: 0;
+      border-radius: 50%;
+      border: 1.5px solid rgba(108,99,255,0.3);
+      animation: wave-expand 2s ease-out infinite;
+    }
+    .wave:nth-child(2) { animation-delay: 0.6s; }
+    .wave:nth-child(3) { animation-delay: 1.2s; }
+
+    @keyframes wave-expand {
+      0% { transform: scale(0.9); opacity: 0.6; }
+      100% { transform: scale(1.5); opacity: 0; }
+    }
+
+    /* Status badge */
+    .status-badge {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 18px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 100px;
+      font-size: 13px;
+      font-weight: 500;
+      letter-spacing: 0.3px;
+      transition: all 0.3s ease;
+    }
+
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--text-muted);
+      transition: background 0.3s;
+    }
+
+    .status-badge.idle .status-dot { background: var(--text-muted); }
+    .status-badge.listening .status-dot {
+      background: var(--green);
+      box-shadow: 0 0 8px var(--green);
+      animation: blink 1s ease-in-out infinite;
+    }
+    .status-badge.thinking .status-dot {
+      background: var(--yellow);
+      box-shadow: 0 0 8px var(--yellow);
+      animation: blink 0.5s ease-in-out infinite;
+    }
+    .status-badge.speaking .status-dot {
+      background: var(--accent2);
+      box-shadow: 0 0 8px var(--accent2);
+      animation: blink 0.4s ease-in-out infinite;
+    }
+
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+
+    /* Transcript box */
+    .transcript-box {
+      width: 100%;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      min-height: 100px;
+      max-height: 200px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .transcript-box::-webkit-scrollbar { width: 4px; }
+    .transcript-box::-webkit-scrollbar-track { background: transparent; }
+    .transcript-box::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+    .transcript-empty {
+      color: var(--text-muted);
+      font-size: 13px;
+      text-align: center;
+      margin: auto;
+    }
+
+    .transcript-entry {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      animation: fade-in 0.3s ease;
+    }
+    @keyframes fade-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+    .transcript-label {
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.8px;
+      text-transform: uppercase;
+      color: var(--text-muted);
+    }
+    .transcript-label.user { color: var(--green); }
+    .transcript-label.assistant { color: var(--accent2); }
+
+    .transcript-text {
+      font-size: 14px;
+      line-height: 1.5;
+      color: var(--text);
+    }
+
+    /* Controls */
+    .controls {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .btn {
+      padding: 12px 28px;
+      border-radius: 100px;
+      border: none;
+      font-family: 'Inter', sans-serif;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      letter-spacing: 0.2px;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, #6c63ff, #a78bfa);
+      color: white;
+      box-shadow: 0 4px 20px rgba(108,99,255,0.3);
+    }
+    .btn-primary:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 6px 24px rgba(108,99,255,0.4);
+    }
+    .btn-primary:active { transform: translateY(0); }
+    .btn-primary:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .btn-danger {
+      background: rgba(248,113,113,0.1);
+      color: var(--red);
+      border: 1px solid rgba(248,113,113,0.3);
+    }
+    .btn-danger:hover {
+      background: rgba(248,113,113,0.2);
+      transform: translateY(-1px);
+    }
+    .btn-danger:disabled { opacity: 0.3; cursor: not-allowed; transform: none; }
+
+    /* Error toast */
+    .error-toast {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%) translateY(80px);
+      background: rgba(248,113,113,0.15);
+      border: 1px solid rgba(248,113,113,0.4);
+      color: var(--red);
+      padding: 10px 20px;
+      border-radius: 100px;
+      font-size: 13px;
+      font-weight: 500;
+      transition: transform 0.3s ease;
+      pointer-events: none;
+      white-space: nowrap;
+    }
+    .error-toast.show { transform: translateX(-50%) translateY(0); }
+
+    /* Connection indicator */
+    .connection-indicator {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+    .conn-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--text-muted);
+    }
+    .conn-dot.connected { background: var(--green); box-shadow: 0 0 6px var(--green); }
+    .conn-dot.disconnected { background: var(--red); }
+  </style>
+</head>
+<body>
+
+  <div class="connection-indicator">
+    <div class="conn-dot" id="connDot"></div>
+    <span id="connLabel">Disconnected</span>
+  </div>
+
+  <div class="container">
+    <div class="header">
+      <h1>Voice Assistant</h1>
+      <p>Powered by Sarvam · GPT-4o · ElevenLabs</p>
+    </div>
+
+    <div class="orb-wrapper">
+      <div class="orb-ring"></div>
+      <div class="orb-ring"></div>
+      <div class="waves" id="waves">
+        <div class="wave"></div>
+        <div class="wave"></div>
+        <div class="wave"></div>
+      </div>
+      <div class="orb" id="orb">
+        <!-- Mic icon (idle/listening) -->
+        <svg id="iconMic" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 1a4 4 0 0 1 4 4v6a4 4 0 0 1-8 0V5a4 4 0 0 1 4-4zm0 2a2 2 0 0 0-2 2v6a2 2 0 0 0 4 0V5a2 2 0 0 0-2-2zm-7 8a1 1 0 0 1 1 1 6 6 0 0 0 12 0 1 1 0 1 1 2 0 8 8 0 0 1-7 7.93V21h2a1 1 0 1 1 0 2H9a1 1 0 1 1 0-2h2v-2.07A8 8 0 0 1 4 12a1 1 0 0 1 1-1z"/>
+        </svg>
+        <!-- Spinner icon (thinking) -->
+        <svg id="iconThink" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" style="display:none; animation: spin 1s linear infinite;">
+          <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8z" opacity="0.3"/>
+          <path d="M12 2a10 10 0 0 1 10 10h-2a8 8 0 0 0-8-8z"/>
+        </svg>
+        <!-- Speaker icon (speaking) -->
+        <svg id="iconSpeak" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" style="display:none;">
+          <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>
+        </svg>
+      </div>
+    </div>
+
+    <div class="status-badge idle" id="statusBadge">
+      <div class="status-dot"></div>
+      <span id="statusText">Click Start to begin</span>
+    </div>
+
+    <div class="transcript-box" id="transcriptBox">
+      <p class="transcript-empty" id="transcriptEmpty">Your conversation will appear here...</p>
+    </div>
+
+    <div class="controls">
+      <button class="btn btn-primary" id="btnStart">Start Session</button>
+      <button class="btn btn-danger" id="btnStop" disabled>End Session</button>
+    </div>
+  </div>
+
+  <div class="error-toast" id="errorToast"></div>
+
+  <script src="/static/playback_engine.js"></script>
+  <script src="/static/audio_capture.js"></script>
+  <script src="/static/websocket_client.js"></script>
+</body>
+</html>
