@@ -175,10 +175,10 @@ const VoiceClient = (() => {
             await AudioCapture.start((pcmFrame) => {
                 if (ws && ws.readyState === WebSocket.OPEN) {
                     // Client-side self-interrupt: stop audio immediately if user speaks
-                    // during AI response (don't wait for server round-trip)
-                    if (currentUIState === 'AI_SPEAKING' || currentUIState === 'AI_PROCESSING') {
+                    // during AI playback (only AI_SPEAKING — backend handles AI_PROCESSING)
+                    if (currentUIState === 'AI_SPEAKING') {
                         const rms = computeRMS(pcmFrame);
-                        if (rms > 500) {
+                        if (rms > 800) {  // 800 = less sensitive, avoids false triggers
                             console.log('[VoiceClient] Self-interrupt: RMS=' + rms.toFixed(0));
                             PlaybackEngine.stopAll();
                             stopBrowserTTS();
