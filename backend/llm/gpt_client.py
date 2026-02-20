@@ -41,5 +41,5 @@ async def stream_llm_response(
         logger.info("[GPT] Stream cancelled")
         raise
     except Exception as e:
-        logger.error(f"[GPT] Error: {type(e).__name__}: {e}")
+        logger.error(f"[GPT] Error: {type(e).__name__}: {e}", exc_info=True)
         raise

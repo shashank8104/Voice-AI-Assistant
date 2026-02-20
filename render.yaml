@@ -13,4 +13,6 @@ services:
         sync: false
       - key: ELEVENLABS_VOICE_ID
         value: 21m00Tcm4TlvDq8ikWAM
+      - key: PYTHON_VERSION
+        value: 3.11.9
     plan: free
