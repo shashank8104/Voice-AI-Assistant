@@ -280,7 +280,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 # ── Interruption: user speaks during AI response ───────────
                 if session.state in (State.AI_SPEAKING, State.AI_PROCESSING):
                     rms = session.compute_rms(frame)
-                    if rms > 500:
+                    if rms > 800:  # 800 = consistent with frontend, avoids false triggers
                         logger.info(f"[Session {session_id}] INTERRUPT (state={session.state}, RMS={rms:.0f})")
                         await session.cancel_ai_tasks()
                         session.transition(State.USER_SPEAKING)
