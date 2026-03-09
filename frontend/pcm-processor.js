@@ -6,9 +6,9 @@
 class PCMProcessor extends AudioWorkletProcessor {
     constructor() {
         super();
-        this.SAMPLE_RATE = 16000;
+        // Use the actual context sample rate (may differ from requested 16000)
         this.FRAME_MS = 20;
-        this.FRAME_SAMPLES = (this.SAMPLE_RATE * this.FRAME_MS) / 1000; // 320 samples
+        this.FRAME_SAMPLES = Math.floor((sampleRate * this.FRAME_MS) / 1000);
         this.buffer = new Float32Array(0);
     }
 
