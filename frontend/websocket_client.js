@@ -243,12 +243,16 @@ const VoiceClient = (() => {
         ws.binaryType = 'arraybuffer';
 
         ws.onopen = () => {
-            console.log('[WS] Connected');
+            console.log('[WS] Connected — enabling chat panel');
             setConnected(true);
             isSessionActive = true;
             btnStart.disabled = true;
             btnStop.disabled = false;
-            setChatEnabled(true);
+            // Enable chat panel — force-remove disabled class and explicitly enable inputs
+            chatPanel.classList.remove('disabled');
+            chatInput.disabled = false;
+            chatSendBtn.disabled = false;
+            chatInput.focus();
             setUIState('USER_SPEAKING');
         };
 
@@ -262,11 +266,17 @@ const VoiceClient = (() => {
             let msg;
             try { msg = JSON.parse(event.data); } catch { return; }
 
-            console.log('[WS] Message:', msg);
+            console.log('[WS] Message:', msg.type, msg);
 
             switch (msg.type) {
                 case 'status':
                     setUIState(msg.state);
+                    // Re-enable chat after each status update (it should stay enabled during session)
+                    if (isSessionActive && msg.state !== 'TIMEOUT') {
+                        chatPanel.classList.remove('disabled');
+                        chatInput.disabled = false;
+                        chatSendBtn.disabled = false;
+                    }
                     if (msg.state === 'TIMEOUT') {
                         showError('Session ended due to inactivity.');
                         endSession(false);
@@ -304,10 +314,17 @@ const VoiceClient = (() => {
                     removeTypingIndicator();
                     break;
 
+                case 'ping':
+                    // Keepalive ping from server — no action needed
+                    break;
+
                 case 'error':
                     removeTypingIndicator();
                     showError(msg.message);
                     break;
+
+                default:
+                    console.warn('[WS] Unknown message type:', msg.type);
             }
         };
 
