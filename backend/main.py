@@ -44,4 +44,6 @@ if __name__ == "__main__":
         host=os.getenv("HOST", "0.0.0.0"),
         port=int(os.getenv("PORT", 8000)),
         reload=True,
+        ws_ping_interval=None,   # Disable websockets keepalive pings (prevents 1011 errors)
+        ws_ping_timeout=None,    # Disable ping timeout entirely
     )

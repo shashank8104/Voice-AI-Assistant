@@ -1,23 +1,20 @@
 /**
  * Audio Capture
- * Captures microphone input via Web Audio API.
- * Converts float32 samples to Int16 PCM and emits 20ms frames.
+ * Captures microphone input via Web Audio API (AudioWorklet).
+ * Falls back to ScriptProcessorNode for older browsers.
+ * Emits 20ms Int16 PCM frames via callback.
  */
 
 const AudioCapture = (() => {
     const SAMPLE_RATE = 16000;
-    const FRAME_MS = 20;
-    const FRAME_SAMPLES = (SAMPLE_RATE * FRAME_MS) / 1000; // 320 samples
 
     let audioCtx = null;
     let mediaStream = null;
     let sourceNode = null;
-    let processorNode = null;
+    let workletNode = null;
+    let processorNode = null; // fallback
     let isCapturing = false;
     let onFrameCallback = null;
-
-    // Accumulate samples until we have a full 20ms frame
-    let sampleBuffer = new Float32Array(0);
 
     /**
      * Start capturing microphone audio.
@@ -38,46 +35,75 @@ const AudioCapture = (() => {
                 },
                 video: false,
             });
-
-            audioCtx = new (window.AudioContext || window.webkitAudioContext)({
-                sampleRate: SAMPLE_RATE,
-            });
-
-            sourceNode = audioCtx.createMediaStreamSource(mediaStream);
-
-            // ScriptProcessorNode for broad browser compatibility
-            // Buffer size 4096 @ 16kHz = 256ms — we'll slice into 20ms frames
-            processorNode = audioCtx.createScriptProcessor(4096, 1, 1);
-
-            processorNode.onaudioprocess = (event) => {
-                if (!isCapturing) return;
-
-                const inputData = event.inputBuffer.getChannelData(0); // Float32
-
-                // Append to rolling buffer
-                const combined = new Float32Array(sampleBuffer.length + inputData.length);
-                combined.set(sampleBuffer);
-                combined.set(inputData, sampleBuffer.length);
-                sampleBuffer = combined;
-
-                // Emit complete 20ms frames
-                while (sampleBuffer.length >= FRAME_SAMPLES) {
-                    const frame = sampleBuffer.slice(0, FRAME_SAMPLES);
-                    sampleBuffer = sampleBuffer.slice(FRAME_SAMPLES);
-                    const pcm = float32ToInt16(frame);
-                    if (onFrameCallback) onFrameCallback(pcm.buffer);
-                }
-            };
-
-            sourceNode.connect(processorNode);
-            processorNode.connect(audioCtx.destination);
-
-            isCapturing = true;
-            console.log('[AudioCapture] Started — sample rate:', audioCtx.sampleRate);
         } catch (err) {
-            console.error('[AudioCapture] Failed to start:', err);
+            console.error('[AudioCapture] Mic access denied:', err);
             throw err;
         }
+
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)({
+            sampleRate: SAMPLE_RATE,
+        });
+
+        sourceNode = audioCtx.createMediaStreamSource(mediaStream);
+
+        // Try AudioWorklet first (modern, non-deprecated)
+        const workletSupported = typeof AudioWorkletNode !== 'undefined';
+        if (workletSupported) {
+            try {
+                await audioCtx.audioWorklet.addModule('/static/pcm-processor.js');
+                workletNode = new AudioWorkletNode(audioCtx, 'pcm-processor', {
+                    channelCount: 1,
+                    processorOptions: {},
+                });
+
+                workletNode.port.onmessage = (event) => {
+                    if (!isCapturing) return;
+                    if (onFrameCallback) onFrameCallback(event.data);
+                };
+
+                sourceNode.connect(workletNode);
+                workletNode.connect(audioCtx.destination);
+
+                isCapturing = true;
+                console.log('[AudioCapture] Started via AudioWorklet — sample rate:', audioCtx.sampleRate);
+                return;
+            } catch (workletErr) {
+                console.warn('[AudioCapture] AudioWorklet failed, falling back to ScriptProcessor:', workletErr);
+                // Fall through to ScriptProcessorNode
+            }
+        }
+
+        // Fallback: ScriptProcessorNode (deprecated but still works)
+        _startScriptProcessor();
+    }
+
+    function _startScriptProcessor() {
+        const FRAME_SAMPLES = (SAMPLE_RATE * 20) / 1000; // 320 samples per 20ms
+        let sampleBuffer = new Float32Array(0);
+
+        processorNode = audioCtx.createScriptProcessor(4096, 1, 1);
+        processorNode.onaudioprocess = (event) => {
+            if (!isCapturing) return;
+
+            const inputData = event.inputBuffer.getChannelData(0);
+            const combined = new Float32Array(sampleBuffer.length + inputData.length);
+            combined.set(sampleBuffer);
+            combined.set(inputData, sampleBuffer.length);
+            sampleBuffer = combined;
+
+            while (sampleBuffer.length >= FRAME_SAMPLES) {
+                const frame = sampleBuffer.slice(0, FRAME_SAMPLES);
+                sampleBuffer = sampleBuffer.slice(FRAME_SAMPLES);
+                const int16 = float32ToInt16(frame);
+                if (onFrameCallback) onFrameCallback(int16.buffer);
+            }
+        };
+
+        sourceNode.connect(processorNode);
+        processorNode.connect(audioCtx.destination);
+
+        isCapturing = true;
+        console.log('[AudioCapture] Started via ScriptProcessor — sample rate:', audioCtx.sampleRate);
     }
 
     /**
@@ -86,8 +112,12 @@ const AudioCapture = (() => {
     function stop() {
         isCapturing = false;
         onFrameCallback = null;
-        sampleBuffer = new Float32Array(0);
 
+        if (workletNode) {
+            workletNode.disconnect();
+            workletNode.port.close();
+            workletNode = null;
+        }
         if (processorNode) {
             processorNode.disconnect();
             processorNode = null;
@@ -101,7 +131,7 @@ const AudioCapture = (() => {
             mediaStream = null;
         }
         if (audioCtx) {
-            audioCtx.close().catch(() => { });
+            audioCtx.close().catch(() => {});
             audioCtx = null;
         }
         console.log('[AudioCapture] Stopped');

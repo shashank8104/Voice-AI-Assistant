@@ -5,6 +5,7 @@ STT → LLM+TTS concurrent sentence streaming → playback.
 Optimized for low latency: TTS starts on first sentence while GPT generates the rest.
 """
 import asyncio
+import json
 import logging
 import time
 import uuid
@@ -238,6 +239,118 @@ async def run_ai_pipeline(session: Session):
     await send_status(session, State.USER_SPEAKING)
 
 
+# ── Chat pipeline (text-only, skips STT) ───────────────────────────────────────
+
+async def run_chat_pipeline(session: Session, user_text: str):
+    """
+    Text chat pipeline: skips STT, feeds user text directly into LLM+TTS.
+    Reuses the same LLM producer / TTS consumer as the voice pipeline.
+    """
+    if not user_text or not user_text.strip():
+        return
+
+    user_text = user_text.strip()
+    t_start = time.time()
+
+    logger.info(f"[Session {session.session_id}] Chat message: '{user_text}'")
+
+    # Show the user's own message in the transcript
+    await send_transcript(session, user_text)
+    session.add_user_message(user_text)
+
+    # ── LLM + TTS concurrent (same as voice pipeline) ──────────────────────────
+    await send_status(session, State.AI_PROCESSING, {"stage": "thinking"})
+
+    messages = session.get_messages()
+    sentence_queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=8)
+    full_response = ""
+    first_token_time = None
+
+    async def llm_producer():
+        nonlocal full_response, first_token_time
+        buffer = ""
+        try:
+            async for token in stream_llm_response(messages):
+                await asyncio.sleep(0)
+                if first_token_time is None:
+                    first_token_time = time.time()
+                full_response += token
+                buffer += token
+                sentences, buffer = _split_sentences(buffer)
+                for s in sentences:
+                    await sentence_queue.put(s)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"[Session {session.session_id}] Chat LLM error: {e}")
+        finally:
+            if buffer.strip():
+                await sentence_queue.put(buffer.strip())
+            await sentence_queue.put(None)
+
+    async def tts_consumer() -> int:
+        audio_bytes_sent = 0
+        first_sentence = True
+        while True:
+            sentence = await sentence_queue.get()
+            if sentence is None:
+                break
+            if first_sentence:
+                first_sentence = False
+                session.transition(State.AI_SPEAKING)
+                await send_status(session, State.AI_SPEAKING)
+                await session.websocket.send_json({"type": "audio_start"})
+            try:
+                async for chunk in stream_tts(_single_gen(sentence)):
+                    await asyncio.sleep(0)
+                    await session.websocket.send_bytes(chunk)
+                    audio_bytes_sent += len(chunk)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"[Session {session.session_id}] Chat TTS chunk error: {e}")
+        return audio_bytes_sent
+
+    llm_task = asyncio.create_task(llm_producer())
+    session.llm_task = llm_task
+
+    audio_bytes_sent = 0
+    try:
+        audio_bytes_sent = await tts_consumer()
+    except asyncio.CancelledError:
+        llm_task.cancel()
+        raise
+    except Exception as e:
+        logger.error(f"[Session {session.session_id}] Chat pipeline error: {e}", exc_info=True)
+    finally:
+        try:
+            await asyncio.wait_for(asyncio.shield(llm_task), timeout=1.0)
+        except Exception:
+            llm_task.cancel()
+
+        await session.websocket.send_json({
+            "type": "audio_end",
+            "audio_bytes_sent": audio_bytes_sent,
+        })
+
+    t_end = time.time()
+    logger.info(
+        f"[Session {session.session_id}] Chat turn done: {audio_bytes_sent} bytes | "
+        f"'{full_response[:60]}' | total={t_end - t_start:.2f}s"
+    )
+
+    if full_response:
+        session.add_assistant_message(full_response)
+        await session.websocket.send_json({
+            "type": "tts_text",
+            "text": full_response,
+            "has_audio": audio_bytes_sent > 0,
+        })
+
+    session.transition(State.USER_SPEAKING)
+    await send_status(session, State.USER_SPEAKING)
+
+
 # ── Keepalive ───────────────────────────────────────────────────────────────────
 
 async def websocket_keepalive(session: Session):
@@ -285,23 +398,39 @@ async def websocket_endpoint(websocket: WebSocket):
     session.transition(State.USER_SPEAKING)
     await send_status(session, State.USER_SPEAKING)
 
+    # Interrupt cooldown: suppress mic interrupts for N seconds after a chat/pipeline starts
+    interrupt_cooldown_until: float = 0.0
+    INTERRUPT_RMS_THRESHOLD = 1200  # Raised from 800 → reduced false positives from background noise
+
     try:
-        async for message in websocket.iter_bytes():
-            if isinstance(message, bytes):
-                frame = message
+        while True:
+            # Use standard Starlette receive() — returns dict with 'type', 'bytes', 'text'
+            data = await websocket.receive()
 
-                # ── Interruption: user speaks during AI response ───────────
+            # Connection closed by client
+            if data["type"] == "websocket.disconnect":
+                logger.info(f"[Session {session_id}] Client disconnected")
+                break
+
+            # ── Binary = PCM audio frame ───────────────────────────────────
+            if "bytes" in data and data["bytes"]:
+                frame = data["bytes"]
+
+                # Interruption: user speaks loudly during AI response
+                # Suppressed during cooldown to prevent chat→immediate-interrupt race
                 if session.state in (State.AI_SPEAKING, State.AI_PROCESSING):
-                    rms = session.compute_rms(frame)
-                    if rms > 800:  # 800 = consistent with frontend, avoids false triggers
-                        logger.info(f"[Session {session_id}] INTERRUPT (state={session.state}, RMS={rms:.0f})")
-                        await session.cancel_ai_tasks()
-                        session.transition(State.USER_SPEAKING)
-                        await send_status(session, State.USER_SPEAKING)
-                        await session.websocket.send_json({"type": "interrupt"})
-                        session.reset_turn()
+                    now = time.time()
+                    if now >= interrupt_cooldown_until:
+                        rms = session.compute_rms(frame)
+                        if rms > INTERRUPT_RMS_THRESHOLD:
+                            logger.info(f"[Session {session_id}] INTERRUPT (state={session.state}, RMS={rms:.0f})")
+                            await session.cancel_ai_tasks()
+                            session.transition(State.USER_SPEAKING)
+                            await send_status(session, State.USER_SPEAKING)
+                            await session.websocket.send_json({"type": "interrupt"})
+                            session.reset_turn()
 
-                # ── Normal audio processing ────────────────────────────────
+                # Normal audio processing
                 if session.state == State.USER_SPEAKING:
                     turn_ended = session.process_frame(frame)
                     if turn_ended:
@@ -309,8 +438,29 @@ async def websocket_endpoint(websocket: WebSocket):
                         pipeline_task = asyncio.create_task(run_ai_pipeline(session))
                         session.llm_task = pipeline_task
 
+            # ── Text = JSON control message ────────────────────────────────
+            elif "text" in data and data["text"]:
+                try:
+                    msg = json.loads(data["text"])
+                except json.JSONDecodeError:
+                    logger.warning(f"[Session {session_id}] Invalid JSON: {data['text'][:80]}")
+                    continue
+
+                msg_type = msg.get("type")
+                logger.debug(f"[Session {session_id}] JSON msg: type={msg_type}")
+
+                if msg_type == "chat_message":
+                    user_text = msg.get("text", "").strip()
+                    logger.info(f"[Session {session_id}] Chat: '{user_text}' (state={session.state})")
+                    if user_text and session.state not in (State.AI_PROCESSING, State.AI_SPEAKING):
+                        # Set a 3s cooldown to prevent mic noise from immediately interrupting the response
+                        interrupt_cooldown_until = time.time() + 3.0
+                        session.transition(State.AI_PROCESSING)
+                        chat_task = asyncio.create_task(run_chat_pipeline(session, user_text))
+                        session.llm_task = chat_task
+
     except WebSocketDisconnect:
-        logger.info(f"[Session {session_id}] Disconnected")
+        logger.info(f"[Session {session_id}] Disconnected (WebSocketDisconnect)")
     except Exception as e:
         logger.error(f"[Session {session_id}] Error: {e}", exc_info=True)
     finally:
