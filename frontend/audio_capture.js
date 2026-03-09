@@ -131,7 +131,7 @@ const AudioCapture = (() => {
             mediaStream = null;
         }
         if (audioCtx) {
-            audioCtx.close().catch(() => {});
+            audioCtx.close().catch(() => { });
             audioCtx = null;
         }
         console.log('[AudioCapture] Stopped');

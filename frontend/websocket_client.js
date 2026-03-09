@@ -2,6 +2,8 @@
  * WebSocket Client
  * Manages the WebSocket connection, sends audio frames,
  * receives audio/status messages, and updates the UI.
+ * Also handles the text chat panel: sending chat_message JSON
+ * and rendering user/assistant bubbles.
  */
 
 const VoiceClient = (() => {
@@ -10,27 +12,33 @@ const VoiceClient = (() => {
 
     let ws = null;
     let isSessionActive = false;
-    let currentUIState = 'IDLE'; // Track current state for client-side interruption
+    let currentUIState = 'IDLE';
 
-    // ── UI elements ──────────────────────────────────────────────────────────
-    const orb = document.getElementById('orb');
-    const waves = document.getElementById('waves');
-    const statusBadge = document.getElementById('statusBadge');
-    const statusText = document.getElementById('statusText');
-    const btnStart = document.getElementById('btnStart');
-    const btnStop = document.getElementById('btnStop');
-    const transcriptBox = document.getElementById('transcriptBox');
-    const transcriptEmpty = document.getElementById('transcriptEmpty');
-    const connDot = document.getElementById('connDot');
-    const connLabel = document.getElementById('connLabel');
-    const errorToast = document.getElementById('errorToast');
-    const iconMic = document.getElementById('iconMic');
-    const iconThink = document.getElementById('iconThink');
-    const iconSpeak = document.getElementById('iconSpeak');
+    // ── Voice UI elements ────────────────────────────────────────────────────
+    const orb          = document.getElementById('orb');
+    const waves        = document.getElementById('waves');
+    const statusBadge  = document.getElementById('statusBadge');
+    const statusText   = document.getElementById('statusText');
+    const btnStart     = document.getElementById('btnStart');
+    const btnStop      = document.getElementById('btnStop');
+    const connDot      = document.getElementById('connDot');
+    const connLabel    = document.getElementById('connLabel');
+    const errorToast   = document.getElementById('errorToast');
+    const iconMic      = document.getElementById('iconMic');
+    const iconThink    = document.getElementById('iconThink');
+    const iconSpeak    = document.getElementById('iconSpeak');
+
+    // ── Chat UI elements ─────────────────────────────────────────────────────
+    const chatPanel    = document.getElementById('chatPanel');
+    const chatMessages = document.getElementById('chatMessages');
+    const chatEmpty    = document.getElementById('chatEmpty');
+    const chatInput    = document.getElementById('chatInput');
+    const chatSendBtn  = document.getElementById('chatSendBtn');
 
     let errorToastTimer = null;
+    let typingIndicator = null;  // Animated dots shown while assistant is thinking/speaking
 
-    // ── UI helpers ───────────────────────────────────────────────────────────
+    // ── Voice UI helpers ─────────────────────────────────────────────────────
 
     function setConnected(connected) {
         connDot.className = 'conn-dot ' + (connected ? 'connected' : 'disconnected');
@@ -38,13 +46,10 @@ const VoiceClient = (() => {
     }
 
     function setUIState(state) {
-        currentUIState = state;  // Track for client-side interrupt detection
-        // Remove all state classes
+        currentUIState = state;
         orb.className = 'orb';
         statusBadge.className = 'status-badge';
         waves.className = 'waves';
-
-        // Hide all icons
         iconMic.style.display = 'none';
         iconThink.style.display = 'none';
         iconSpeak.style.display = 'none';
@@ -55,21 +60,20 @@ const VoiceClient = (() => {
                 iconMic.style.display = 'block';
                 statusBadge.classList.add('idle');
                 break;
-
             case 'USER_SPEAKING':
                 orb.classList.add('listening');
                 statusBadge.classList.add('listening');
                 statusText.textContent = 'Listening...';
                 iconMic.style.display = 'block';
+                removeTypingIndicator();
                 break;
-
             case 'AI_PROCESSING':
                 orb.classList.add('thinking');
                 statusBadge.classList.add('thinking');
                 statusText.textContent = 'Thinking...';
                 iconThink.style.display = 'block';
+                showTypingIndicator();
                 break;
-
             case 'AI_SPEAKING':
                 orb.classList.add('speaking');
                 statusBadge.classList.add('speaking');
@@ -77,11 +81,11 @@ const VoiceClient = (() => {
                 waves.classList.add('active');
                 iconSpeak.style.display = 'block';
                 break;
-
             case 'TIMEOUT':
                 statusText.textContent = 'Session timed out';
                 iconMic.style.display = 'block';
                 statusBadge.classList.add('idle');
+                removeTypingIndicator();
                 break;
         }
     }
@@ -93,26 +97,6 @@ const VoiceClient = (() => {
         errorToastTimer = setTimeout(() => errorToast.classList.remove('show'), 4000);
     }
 
-    function addTranscriptEntry(role, text) {
-        if (transcriptEmpty) transcriptEmpty.style.display = 'none';
-
-        const entry = document.createElement('div');
-        entry.className = 'transcript-entry';
-        entry.innerHTML = `
-      <span class="transcript-label ${role}">${role === 'user' ? 'You' : 'Assistant'}</span>
-      <span class="transcript-text">${escapeHtml(text)}</span>
-    `;
-        transcriptBox.appendChild(entry);
-        transcriptBox.scrollTop = transcriptBox.scrollHeight;
-    }
-
-    function escapeHtml(text) {
-        return text
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;');
-    }
-
     /** Compute RMS energy from Int16 PCM ArrayBuffer. */
     function computeRMS(arrayBuffer) {
         const samples = new Int16Array(arrayBuffer);
@@ -122,42 +106,106 @@ const VoiceClient = (() => {
         return Math.sqrt(sum / samples.length);
     }
 
-    // ── Browser TTS fallback (Web Speech API) ───────────────────────────────
+    // ── Chat helpers ─────────────────────────────────────────────────────────
+
+    function setChatEnabled(enabled) {
+        chatPanel.classList.toggle('disabled', !enabled);
+        chatInput.disabled = !enabled;
+        chatSendBtn.disabled = !enabled;
+        if (enabled) chatInput.focus();
+    }
+
+    function escapeHtml(text) {
+        return text
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+    }
+
+    /** Add a bubble to the chat panel. role = 'user' | 'assistant' */
+    function addChatBubble(role, text) {
+        if (chatEmpty) chatEmpty.style.display = 'none';
+
+        const bubble = document.createElement('div');
+        bubble.className = `chat-bubble ${role}`;
+        bubble.innerHTML = `
+            <span class="bubble-label">${role === 'user' ? 'You' : 'Assistant'}</span>
+            <div class="bubble-content">${escapeHtml(text)}</div>
+        `;
+        chatMessages.appendChild(bubble);
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+
+    /** Show animated typing dots while assistant is processing. */
+    function showTypingIndicator() {
+        if (typingIndicator) return; // Already showing
+        if (chatEmpty) chatEmpty.style.display = 'none';
+
+        typingIndicator = document.createElement('div');
+        typingIndicator.className = 'chat-bubble assistant';
+        typingIndicator.innerHTML = `
+            <span class="bubble-label">Assistant</span>
+            <div class="typing-indicator">
+                <div class="typing-dot"></div>
+                <div class="typing-dot"></div>
+                <div class="typing-dot"></div>
+            </div>
+        `;
+        chatMessages.appendChild(typingIndicator);
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+
+    function removeTypingIndicator() {
+        if (typingIndicator) {
+            typingIndicator.remove();
+            typingIndicator = null;
+        }
+    }
+
+    /** Send a text chat message over the WebSocket. */
+    function sendChatMessage() {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        if (!isSessionActive) return;
+
+        const text = chatInput.value.trim();
+        if (!text) return;
+
+        // Optimistic UI: add user bubble immediately
+        addChatBubble('user', text);
+        chatInput.value = '';
+        autoResizeInput();
+        showTypingIndicator();
+
+        ws.send(JSON.stringify({ type: 'chat_message', text }));
+    }
+
+    /** Auto-resize the textarea as the user types. */
+    function autoResizeInput() {
+        chatInput.style.height = 'auto';
+        chatInput.style.height = Math.min(chatInput.scrollHeight, 100) + 'px';
+    }
+
+    // ── Browser TTS fallback (Web Speech API) ────────────────────────────────
 
     let speechSynth = window.speechSynthesis;
     let currentUtterance = null;
 
     function speakWithBrowserTTS(text) {
-        if (!speechSynth) {
-            console.warn('[BrowserTTS] SpeechSynthesis not supported');
-            return;
-        }
-        // Cancel any ongoing speech
+        if (!speechSynth) return;
         speechSynth.cancel();
-
         currentUtterance = new SpeechSynthesisUtterance(text);
         currentUtterance.rate = 1.0;
         currentUtterance.pitch = 1.0;
         currentUtterance.volume = 1.0;
         currentUtterance.lang = 'en-IN';
-
-        // Pick a good voice if available
         const voices = speechSynth.getVoices();
         const preferred = voices.find(v =>
             v.lang.startsWith('en') && (v.name.includes('Google') || v.name.includes('Natural'))
         ) || voices.find(v => v.lang.startsWith('en')) || voices[0];
         if (preferred) currentUtterance.voice = preferred;
-
-        currentUtterance.onend = () => {
-            console.log('[BrowserTTS] Speech ended');
-            currentUtterance = null;
-        };
-        currentUtterance.onerror = (e) => {
-            console.warn('[BrowserTTS] Error:', e.error);
-        };
-
+        currentUtterance.onend = () => { currentUtterance = null; };
+        currentUtterance.onerror = (e) => { console.warn('[BrowserTTS] Error:', e.error); };
         speechSynth.speak(currentUtterance);
-        console.log('[BrowserTTS] Speaking:', text.slice(0, 60) + '...');
     }
 
     function stopBrowserTTS() {
@@ -165,20 +213,18 @@ const VoiceClient = (() => {
         currentUtterance = null;
     }
 
-    // ── Session control ──────────────────────────────────────────────────────
+    // ── Session control ───────────────────────────────────────────────────────
 
     async function startSession() {
         if (isSessionActive) return;
 
         try {
-            // Start audio capture first
             await AudioCapture.start((pcmFrame) => {
                 if (ws && ws.readyState === WebSocket.OPEN) {
-                    // Client-side self-interrupt: stop audio immediately if user speaks
-                    // during AI playback (only AI_SPEAKING — backend handles AI_PROCESSING)
+                    // Client-side self-interrupt during AI playback
                     if (currentUIState === 'AI_SPEAKING') {
                         const rms = computeRMS(pcmFrame);
-                        if (rms > 800) {  // 800 = less sensitive, avoids false triggers
+                        if (rms > 800) {
                             console.log('[VoiceClient] Self-interrupt: RMS=' + rms.toFixed(0));
                             PlaybackEngine.stopAll();
                             stopBrowserTTS();
@@ -193,7 +239,6 @@ const VoiceClient = (() => {
             return;
         }
 
-        // Connect WebSocket
         ws = new WebSocket(WS_URL);
         ws.binaryType = 'arraybuffer';
 
@@ -203,6 +248,7 @@ const VoiceClient = (() => {
             isSessionActive = true;
             btnStart.disabled = true;
             btnStop.disabled = false;
+            setChatEnabled(true);
             setUIState('USER_SPEAKING');
         };
 
@@ -213,7 +259,6 @@ const VoiceClient = (() => {
                 return;
             }
 
-            // JSON = control message
             let msg;
             try { msg = JSON.parse(event.data); } catch { return; }
 
@@ -229,13 +274,16 @@ const VoiceClient = (() => {
                     break;
 
                 case 'transcript':
-                    addTranscriptEntry('user', msg.text);
+                    // Voice transcripts: show in chat panel as user bubble
+                    removeTypingIndicator();
+                    addChatBubble('user', msg.text);
+                    showTypingIndicator();
                     break;
 
                 case 'tts_text':
-                    // Display assistant response in transcript
-                    addTranscriptEntry('assistant', msg.text);
-                    // Use browser TTS if ElevenLabs had no audio
+                    // Assistant full response: replace typing indicator with bubble
+                    removeTypingIndicator();
+                    addChatBubble('assistant', msg.text);
                     if (!msg.has_audio) {
                         console.log('[WS] No ElevenLabs audio — using browser TTS fallback');
                         speakWithBrowserTTS(msg.text);
@@ -247,16 +295,17 @@ const VoiceClient = (() => {
                     break;
 
                 case 'audio_end':
-                    // Flush any remaining accumulated audio chunks
                     PlaybackEngine.finishReceiving();
                     break;
 
                 case 'interrupt':
                     PlaybackEngine.stopAll();
                     stopBrowserTTS();
+                    removeTypingIndicator();
                     break;
 
                 case 'error':
+                    removeTypingIndicator();
                     showError(msg.message);
                     break;
             }
@@ -265,9 +314,8 @@ const VoiceClient = (() => {
         ws.onclose = (event) => {
             console.log('[WS] Closed:', event.code, event.reason);
             setConnected(false);
-            if (isSessionActive) {
-                endSession(false);
-            }
+            setChatEnabled(false);
+            if (isSessionActive) endSession(false);
         };
 
         ws.onerror = (err) => {
@@ -280,6 +328,8 @@ const VoiceClient = (() => {
         isSessionActive = false;
         AudioCapture.stop();
         PlaybackEngine.stopAll();
+        removeTypingIndicator();
+        setChatEnabled(false);
 
         if (closeWs && ws && ws.readyState === WebSocket.OPEN) {
             ws.close(1000, 'User ended session');
@@ -293,17 +343,29 @@ const VoiceClient = (() => {
         console.log('[VoiceClient] Session ended');
     }
 
-    // ── Event listeners ──────────────────────────────────────────────────────
+    // ── Chat event listeners ──────────────────────────────────────────────────
+
+    chatSendBtn.addEventListener('click', sendChatMessage);
+
+    chatInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendChatMessage();
+        }
+    });
+
+    chatInput.addEventListener('input', autoResizeInput);
+
+    // ── Voice event listeners ─────────────────────────────────────────────────
 
     btnStart.addEventListener('click', startSession);
     btnStop.addEventListener('click', () => endSession(true));
-
-    // Cleanup on page unload
     window.addEventListener('beforeunload', () => endSession(true));
 
-    // Initial UI state
+    // Initial state
     setUIState('IDLE');
     setConnected(false);
+    setChatEnabled(false);
 
     return { startSession, endSession };
 })();
